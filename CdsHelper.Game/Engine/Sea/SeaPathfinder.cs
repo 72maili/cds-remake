@@ -1,4 +1,4 @@
-using CdsHelper.Game.Local.Helpers;
+﻿using CdsHelper.Game.Local.Helpers;
 using CdsHelper.Support.Local.Helpers;
 
 namespace CdsHelper.Game.Engine.Sea;
@@ -16,6 +16,11 @@ namespace CdsHelper.Game.Engine.Sea;
 /// 8방위 격자 A* 로 찾고, 찾은 뒤에는 <b>직선으로 이을 수 있는 자리끼리 건너뛰어</b> 마디
 /// 수를 줄인다(string-pulling) — 격자를 한 칸씩 밟은 계단 모양 대신 매끄러운 직선 몇
 /// 토막으로 남는다.
+///
+/// 배는 원본처럼 뱃머리를 <b>8방위</b>로만 잡아서 긴 직선을 따라가면 선에서 그 길이의 1할 남짓까지
+/// 벗어난다. 해안을 스치는 직선이면 그만큼 뭍에 박힌다. 그래서 길은 <b>해안에서 한 칸 떨어지기를
+/// 바라고</b>(<see cref="CoastCost"/>), 줄일 때도 둘레 한 칸이 트인 직선만 잇는다
+/// (<see cref="LineIsClear"/>). 자동항해는 거기에 마디를 촘촘히 더해 쓴다(<see cref="Densify"/>).
 /// </remarks>
 public static class SeaPathfinder
 {
@@ -37,6 +42,18 @@ public static class SeaPathfinder
 
     /// <summary>둘레 가로가 이보다 넓어지지 않는다 — 지도 폭(2500)의 곱절 남짓이면 충분하다.</summary>
     private const int MaxBoxWidth = 3200;
+
+    /// <summary>
+    /// 해안 가까운 칸에 얹는 웃돈 — 차례로 뭍이 한 칸 · 두 칸 … 안에 있을 때다. 막지는 않는다 — 좁은 물길은 그대로 지나간다.
+    /// </summary>
+    /// <remarks>두 칸째(1.0)까지 얹어 보았는데 길은 거의 같고 찾는 데 곱절 걸려 한 칸만 둔다.</remarks>
+    private static readonly double[] CoastCost = [3.0];
+
+    /// <summary>
+    /// 어림에 곱하는 값(weighted A*) — 1 이면 가장 짧은 길이고, 클수록 덜 둘러보고 빨리 찾는다.
+    /// 해안 웃돈이 붙으면 둘러볼 칸이 늘어 긴 항로가 1초를 넘겼다. 1.5 면 도시 57쌍에서 가장 긴 것이 1.3초 남짓이다.
+    /// </summary>
+    private const double HeuristicWeight = 1.5;
 
     /// <summary>
     /// 시작 칸에서 도착 칸까지 바닷길을 찾는다. 둘 다 뭍이면 가까운 물칸으로 민다.
@@ -107,6 +124,14 @@ public static class SeaPathfinder
         int startIdx = Idx(sx, sy), goalIdx = Idx(gx, gy);
         gScore[startIdx] = 0;
 
+        // 칸마다 뭍까지의 거리 — 처음 볼 때 한 번만 잰다.
+        var coast = new byte[w * h];
+        double Coast(int x, int y, int i)
+        {
+            if (coast[i] == 0) coast[i] = (byte)CoastDistance(ok, x, y);
+            return coast[i] <= CoastCost.Length ? CoastCost[coast[i] - 1] : 0;
+        }
+
         var open = new PriorityQueue<int, double>();
         open.Enqueue(startIdx, Heuristic(sx, sy, gx, gy));
 
@@ -129,19 +154,19 @@ public static class SeaPathfinder
 
                 int ni = Idx(nx, ny);
                 if (visited[ni]) continue;
-                double ng = gScore[cur] + cost;
+                double ng = gScore[cur] + cost + Coast(nx, ny, ni);
                 if (ng < gScore[ni])
                 {
                     gScore[ni] = ng;
                     cameFrom[ni] = cur;
-                    open.Enqueue(ni, ng + Heuristic(nx, ny, gx, gy));
+                    open.Enqueue(ni, ng + HeuristicWeight * Heuristic(nx, ny, gx, gy));
                 }
             }
         }
         return null;
     }
 
-    /// <summary>팔방 격자에 맞는 어림(옥타일 거리) — 늘 실제 거리 이하라 A* 가 어긋나지 않는다.</summary>
+    /// <summary>팔방 격자에 맞는 어림(옥타일 거리) — 늘 실제 거리 이하다. <see cref="HeuristicWeight"/> 를 곱해 쓰므로 찾은 길은 가장 짧은 것보다 조금 길 수 있다.</summary>
     private static double Heuristic(int x, int y, int gx, int gy)
     {
         double dx = Math.Abs(x - gx), dy = Math.Abs(y - gy);
@@ -162,6 +187,10 @@ public static class SeaPathfinder
     /// 먼 보이는 자리를 찾으므로, 못 찾아도(휘어진 물길이 시야를 가려도) 그보다 못 미친
     /// 자리를 골라 안전은 늘 지킨다.
     /// </summary>
+    /// <remarks>
+    /// 직선은 둘레 한 칸까지 트여 있어야 잇는다(<see cref="LineIsClear"/>) — 해안을 스치는 직선을 안 만든다.
+    /// 좁은 물길에서는 그런 직선이 없어 격자 칸마다 마디가 선다.
+    /// </remarks>
     private static List<(double X, double Y)> Simplify(
         Func<int, int, bool> ok, List<(int X, int Y)> path)
     {
@@ -173,7 +202,7 @@ public static class SeaPathfinder
             while (lo <= hi)
             {
                 int mid = (lo + hi) / 2;
-                if (LineIsOpen(ok, path[i], path[mid])) { best = mid; lo = mid + 1; }
+                if (LineIsClear(ok, path[i], path[mid])) { best = mid; lo = mid + 1; }
                 else hi = mid - 1;
             }
             outPts.Add(Center(path[best]));
@@ -183,6 +212,50 @@ public static class SeaPathfinder
     }
 
     private static (double X, double Y) Center((int X, int Y) c) => (c.X + 0.5, c.Y + 0.5);
+
+    /// <summary>
+    /// 마디 사이를 <paramref name="maxStep"/> 칸 이하로 쪼갠다 — 8방위로 도는 배가 직선에서 덜 벗어나게.
+    /// </summary>
+    /// <remarks>
+    /// 배는 바라는 쪽을 8방위로 꺾고(동서남북 53도 · 대각 37도 폭), 마디가 멀면 그 사이 내내 같은 쪽으로
+    /// 간다. 그래서 길이 D 인 토막을 따라가며 선에서 D 의 1할 남짓 벗어난다 — 마디를 촘촘히 두면 그 폭이 준다.
+    /// </remarks>
+    public static List<(double X, double Y)> Densify(List<(double X, double Y)> route, double maxStep)
+    {
+        if (route.Count < 2 || maxStep <= 0) return route;
+        var outPts = new List<(double X, double Y)> { route[0] };
+        for (int i = 1; i < route.Count; i++)
+        {
+            var (ax, ay) = route[i - 1];
+            var (bx, by) = route[i];
+            int parts = (int)Math.Ceiling(Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)) / maxStep);
+            for (int k = 1; k < parts; k++)
+                outPts.Add((ax + (bx - ax) * k / parts, ay + (by - ay) * k / parts));
+            outPts.Add(route[i]);
+        }
+        return outPts;
+    }
+
+    /// <summary>그 칸에서 뭍까지 체비셰프 거리 — <see cref="CoastCost"/> 길이 안이면 그 수, 더 멀면 길이 + 1.</summary>
+    private static int CoastDistance(Func<int, int, bool> ok, int x, int y)
+    {
+        for (int r = 1; r <= CoastCost.Length; r++)
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    if (Math.Abs(dx) != r && Math.Abs(dy) != r) continue;
+                    if (!ok(x + dx, y + dy)) return r;
+                }
+        return CoastCost.Length + 1;
+    }
+
+    /// <summary>
+    /// 두 칸을 잇는 직선이 <b>둘레 한 칸까지</b> 트여 있는지 — 직선 위 칸과 그 위아래 · 좌우가 다 물이어야 한다.
+    /// </summary>
+    private static bool LineIsClear(Func<int, int, bool> ok, (int X, int Y) a, (int X, int Y) b) =>
+        LineIsOpen((x, y) => ok(x, y) && ok(x + 1, y) && ok(x - 1, y) && ok(x, y + 1) && ok(x, y - 1), a, b)
+        // 양 끝이 해안이면(항구 앞 · 좁은 물길) 둘레 검사가 늘 걸린다 — 바로 옆 칸끼리는 그대로 잇는다.
+        || (Math.Abs(a.X - b.X) <= 1 && Math.Abs(a.Y - b.Y) <= 1 && LineIsOpen(ok, a, b));
 
     /// <summary>두 칸을 잇는 직선이 처음부터 끝까지 지나갈 수 있는 칸인지 — 브레젠험으로 훑는다.</summary>
     private static bool LineIsOpen(Func<int, int, bool> ok, (int X, int Y) a, (int X, int Y) b)

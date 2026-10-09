@@ -806,6 +806,24 @@ public sealed class ShipMapWindow : Window
         return message;
     }
 
+    /// <summary>
+    /// 자동항해(뭍에서는 자동이동)를 끈다 — Esc · 방향키 · 숫자판 · 커맨드 「자동항해 중지」가 부른다.
+    /// 배는 세우지 않는다. 숫자판 · 방향키로 끄면 그 쪽으로 이어서 간다.
+    /// </summary>
+    private void CancelAutoSail()
+    {
+        if (!_host.AutoSailing) return;
+        _host.StopAutoSail();
+        Say(_host.IsOnLand ? "자동이동을 멈췄습니다" : "자동항해를 멈췄습니다");
+    }
+
+    /// <summary>방향키 — 자동항해 중에만 숫자판 2 · 4 · 6 · 8 처럼 그 쪽으로 뱃머리를 돌린다(그러며 자동항해를 끈다).</summary>
+    private static int? ArrowWay(Key key) => key switch
+    {
+        Key.Up => 0, Key.Left => 4, Key.Down => 8, Key.Right => 12,
+        _ => null,
+    };
+
     /// <summary>도시 이름으로 자동항해 목적지를 고르는 창을 연다 — 지금 아는 도시만 나온다.</summary>
     private void ShowAutoSailDialog()
     {
@@ -2731,6 +2749,8 @@ public sealed class ShipMapWindow : Window
         {
             if (CommandMenu.IsOpen) { CommandMenu.Close(); e.Handled = true; return; }
             if (InfoMenu.IsOpen) { InfoMenu.Close(); e.Handled = true; return; }
+            // 떠 있는 창이 없으면 자동항해를 끈다 — 원본에 없는 기능이라 끄는 글쇠도 따로 없었다.
+            if (_host.AutoSailing && !_host.SeaBlocked && !_host.Paused) { CancelAutoSail(); e.Handled = true; return; }
         }
 
         if (e.Handled || Keyboard.Modifiers != ModifierKeys.None) return;
@@ -2746,7 +2766,20 @@ public sealed class ShipMapWindow : Window
         {
             e.Handled = true;
             if (pad < 0) _host.ToggleAnchor();          // 「5」
-            else _host.SteerTo(pad);
+            else
+            {
+                // 자동항해 중이면 SteerTo 가 끈다 — 알림만 여기서 낸다.
+                if (_host.AutoSailing) Say(_host.IsOnLand ? "자동이동을 멈췄습니다" : "자동항해를 멈췄습니다");
+                _host.SteerTo(pad);
+            }
+            return;
+        }
+        // 방향키는 자동항해 중에만 먹는다 — 원본에 없는 글쇠라 평소에는 건드리지 않는다.
+        if (_host.AutoSailing && ArrowWay(e.Key) is { } arrow && !_host.SeaBlocked && !_host.Paused)
+        {
+            e.Handled = true;
+            CancelAutoSail();
+            _host.SteerTo(arrow);
             return;
         }
         if (e.Key is Key.D0 or Key.NumPad0)
@@ -3436,6 +3469,10 @@ public sealed class ShipMapWindow : Window
             if (!_game.CityKnown(town) || !(_game.CityRows?.HasBuilding(town, door) ?? true)) continue;
             items.Add(($"[{_game.CityName(town)}]에 들어간다", () => { Close(); AskEnterCity(town); }));
         }
+
+        // 자동항해 중이면 끄는 줄을 둔다 — 원본에 없는 줄이다(자동항해가 원본에 없다).
+        if (_host.AutoSailing)
+            items.Add((_host.IsOnLand ? "자동이동 중지" : "자동항해 중지", () => { Close(); CancelAutoSail(); }));
 
         if (_host.IsOnLand)
         {

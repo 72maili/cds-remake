@@ -684,6 +684,8 @@ public sealed class ShipMapHost : HwndHost
     /// </summary>
     public void SteerTo(int heading)
     {
+        // 자동항해 중이면 끈다 — 안 끄면 다음 프레임에 항로가 뱃머리를 도로 가져간다.
+        StopAutoSail();
         _desired = heading & 0xF;
         _making = true;
         _anchored = false;
@@ -1255,12 +1257,37 @@ public sealed class ShipMapHost : HwndHost
     /// <summary>도착으로 칠 만큼 마디에 다가섰는지(칸).</summary>
     private const double AutoWaypointRadius = 2.0;
 
-    /// <summary>이만큼(칸) 움직이지 않고 이 틱 수를 넘기면 막힌 것으로 보고 멈춘다.</summary>
+    /// <summary>
+    /// 향하는 마디에 이만큼(칸) 더 다가서지 못한 채 이 틱 수를 넘기면 막힌 것으로 본다.
+    /// </summary>
+    /// <remarks>
+    /// 예전에는 <b>움직인 거리</b>로 쟀다. 해안에 박힌 배가 미끄러지며 좌우로 오가면 한 칸 넘게 움직이므로
+    /// 셈이 늘 0 으로 돌아가 영영 안 멎었다. 이제는 마디까지 남은 거리가 줄었는지로 잰다.
+    /// </remarks>
     private const double StuckMoveThreshold = 1.0;
     private const int StuckTickLimit = 150;   // 0.1초 x 150 = 15초
 
-    private double _stuckX, _stuckY;
-    private int _stuckTicks;
+    /// <summary>뭍에 걸린 틱이 이만큼 이어지면 그 자리에서 길을 다시 찾는다.</summary>
+    private const int BlockedTickLimit = 10;   // 1초
+
+    /// <summary>
+    /// 길을 다시 찾는 횟수의 끝 — 넘으면 멈춘다. 다시 찾은 자리에서 <see cref="AutoStepCells"/> 칸 넘게 벗어나면 0 으로 돌린다.
+    /// </summary>
+    /// <remarks>마디를 넘긴 것으로 돌리면 안 된다 — 새 길의 첫 마디는 배가 선 칸이라 곧바로 넘어간다.</remarks>
+    private const int MaxReplans = 4;
+
+    /// <summary>자동항해 마디 사이 가장 긴 거리(칸) — <see cref="Engine.Sea.SeaPathfinder.Densify"/>.</summary>
+    private const double AutoStepCells = 5.0;
+
+    private double _stuckBest;
+    private int _stuckTicks, _blockedTicks, _replans, _stuckIndex;
+
+    /// <summary>자동항해의 끝자리와 뭍길인지 — 길을 다시 찾을 때 쓴다.</summary>
+    private (double X, double Y) _autoGoal;
+    private bool _autoLand;
+
+    /// <summary>마지막으로 길을 다시 찾은(또는 처음 짠) 자리.</summary>
+    private (double X, double Y) _replanAt;
 
     /// <summary>
     /// 그 칸까지 바닷길을 찾아 자동항해를 시작한다. 뭍이나 도시 안에서는, 지도를 아직 못
@@ -1276,15 +1303,8 @@ public sealed class ShipMapHost : HwndHost
         if (route == null) return (false, "바닷길을 찾지 못했습니다");
         if (route.Count < 2) return (false, "이미 그 자리 가까이 있습니다");
 
-        _autoRoute = route;
-        _autoIndex = 0;
-        _anchored = false;
-        _tickAccum = 0;
-        _stuckX = _shipX;
-        _stuckY = _shipY;
-        _stuckTicks = 0;
-        _dirty = true;
-        return (true, $"{route.Count}개 마디로 바닷길을 짰습니다");
+        BeginAuto(route, (destX, destY), land: false);
+        return (true, $"{route.Count}개 마디로 바닷길을 짰습니다 — Esc · 방향키 · 숫자판으로 멈춥니다");
     }
 
     /// <summary>
@@ -1301,15 +1321,31 @@ public sealed class ShipMapHost : HwndHost
         if (route == null) return (false, "뭍길을 찾지 못했습니다");
         if (route.Count < 2) return (false, "이미 그 자리 가까이 있습니다");
 
-        _autoRoute = route;
+        BeginAuto(route, (destX, destY), land: true);
+        return (true, "그 자리로 걸어갑니다");
+    }
+
+    /// <summary>짠 길을 걸고 막힘 셈을 새로 연다. 길은 <see cref="AutoStepCells"/> 칸 간격으로 쪼개 쓴다.</summary>
+    private void BeginAuto(List<(double X, double Y)> route, (double X, double Y) goal, bool land)
+    {
+        _autoRoute = Engine.Sea.SeaPathfinder.Densify(route, AutoStepCells);
         _autoIndex = 0;
+        _autoGoal = goal;
+        _autoLand = land;
         _anchored = false;
         _tickAccum = 0;
-        _stuckX = _shipX;
-        _stuckY = _shipY;
-        _stuckTicks = 0;
+        _replans = 0;
+        _replanAt = (_shipX, _shipY);
+        ResetStuck();
         _dirty = true;
-        return (true, "그 자리로 걸어갑니다");
+    }
+
+    private void ResetStuck()
+    {
+        _stuckBest = double.PositiveInfinity;
+        _stuckIndex = _autoIndex;
+        _stuckTicks = 0;
+        _blockedTicks = 0;
     }
 
     /// <summary>자동항해를 끈다. 그 자리에 세우지 않는다 — 손으로 이어서 몰 수 있게 둔다.</summary>
@@ -1333,11 +1369,47 @@ public sealed class ShipMapHost : HwndHost
             var (wx, wy) = route[_autoIndex];
             double dx = WrapDx(wx - _shipX), dy = wy - _shipY;
             if (dx * dx + dy * dy <= AutoWaypointRadius * AutoWaypointRadius) { _autoIndex++; continue; }
-            _targetX = _shipX + dx;
-            _targetY = _shipY + dy;
+            (_targetX, _targetY) = AvoidCoast(dx, dy);
             return;
         }
         CompleteAutoSail(_onLand ? "도착했습니다" : "도착했습니다 — 닻을 내렸습니다");
+    }
+
+    /// <summary>8방위 단위 걸음 — 동에서 시계 반대로(화면은 아래가 +y).</summary>
+    private static readonly (double X, double Y)[] Compass8 =
+    [
+        (1, 0), (0.7071, -0.7071), (0, -1), (-0.7071, -0.7071),
+        (-1, 0), (-0.7071, 0.7071), (0, 1), (0.7071, 0.7071),
+    ];
+
+    /// <summary>
+    /// 마디 쪽(<paramref name="dx"/>, <paramref name="dy"/>)으로 가되, 그 8방위 바로 앞이 뭍이면 <b>트인 옆 방위</b>로 꺾는다.
+    /// 돌려주는 것은 뱃머리를 돌릴 목표 자리다.
+    /// </summary>
+    /// <remarks>
+    /// 배는 칸 한가운데를 다니지 않아서, 정동 · 정서처럼 축으로 갈 때 뭍 칸 모서리에 정면으로 걸리면
+    /// 가로 · 세로 미끄러짐(<see cref="Step"/>)도 못 한다 — 그 자리에 굳는다. 바다에 트인 방위가 하나라도 있으면
+    /// 마디 쪽과 가장 가까운 것을 고른다(90도 안쪽만). 앞이 트였으면 원래대로 마디를 곧장 본다.
+    /// </remarks>
+    private (double X, double Y) AvoidCoast(double dx, double dy)
+    {
+        bool Open((double X, double Y) v) =>
+            CanGo(_shipX + v.X * 0.5, _shipY + v.Y * 0.5) && CanGo(_shipX + v.X * 1.0, _shipY + v.Y * 1.0);
+
+        int want = Sector8(dx, dy);
+        // Sector8 이 내는 16방위 값을 Compass8 차례로 — 동 12 · 북동 14 · 북 0 · 북서 2 · 서 4 · 남서 6 · 남 8 · 남동 10.
+        int at = ((want - 12) / 2 % 8 + 8) % 8;
+        if (Open(Compass8[at])) return (_shipX + dx, _shipY + dy);
+
+        double len = Math.Sqrt(dx * dx + dy * dy);
+        (double X, double Y)? best = null;
+        double bestDot = 0;   // 90도 안쪽(내적 > 0)만
+        foreach (var v in Compass8)
+        {
+            double dot = (v.X * dx + v.Y * dy) / len;
+            if (dot > bestDot && Open(v)) { bestDot = dot; best = v; }
+        }
+        return best is { } go ? (_shipX + go.X * 4, _shipY + go.Y * 4) : (_shipX + dx, _shipY + dy);
     }
 
     private void CompleteAutoSail(string message)
@@ -1351,26 +1423,63 @@ public sealed class ShipMapHost : HwndHost
     }
 
     /// <summary>
-    /// 자동항해 중에 오래 못 나아가면 멈춘다 — 길찾기가 어긋나 뭍 가까이서 맴도는 것을
-    /// 막는 마지막 안전판이다. <see cref="Sail"/> 이 걸음마다 부른다.
+    /// 자동항해 중에 막히면 그 자리에서 길을 다시 찾고, 그래도 안 되면 멈춘다 — 길찾기가 어긋나
+    /// 뭍 가까이서 맴도는 것을 막는 안전판이다. <see cref="Sail"/> 이 걸음마다 부른다.
     /// </summary>
+    /// <remarks>
+    /// 둘을 본다. 뭍에 걸린 틱이 <see cref="BlockedTickLimit"/> 만큼 이어지면 곧바로 다시 찾는다. 걸리지는 않았어도
+    /// 향하는 마디에 <see cref="StuckTickLimit"/> 틱 동안 한 칸도 더 못 다가서면(해류 · 역풍 · 맴돌기) 그때도 다시 찾는다.
+    /// 다시 찾기를 <see cref="MaxReplans"/> 번 넘기면 멈추고 알린다.
+    /// </remarks>
     private void UpdateStuckGuard()
     {
-        double dx = _shipX - _stuckX, dy = _shipY - _stuckY;
-        if (dx * dx + dy * dy >= StuckMoveThreshold * StuckMoveThreshold)
+        if (_autoRoute is not { } route) return;
+        if (_stuckIndex != _autoIndex)
         {
-            _stuckX = _shipX;
-            _stuckY = _shipY;
-            _stuckTicks = 0;
+            double mx = WrapDx(_shipX - _replanAt.X), my = _shipY - _replanAt.Y;
+            if (mx * mx + my * my >= AutoStepCells * AutoStepCells) _replans = 0;
+            ResetStuck();
+        }
+
+        _blockedTicks = _blocked ? _blockedTicks + 1 : 0;
+        if (_blockedTicks >= BlockedTickLimit) { Replan(); return; }
+
+        if (_autoIndex < route.Count)
+        {
+            var (wx, wy) = route[_autoIndex];
+            double dx = WrapDx(wx - _shipX), dy = wy - _shipY;
+            double dist = Math.Sqrt(dx * dx + dy * dy);
+            if (dist <= _stuckBest - StuckMoveThreshold) { _stuckBest = dist; _stuckTicks = 0; return; }
+            if (double.IsPositiveInfinity(_stuckBest)) _stuckBest = dist;
+        }
+        if (++_stuckTicks >= StuckTickLimit) Replan();
+    }
+
+    /// <summary>지금 자리에서 끝자리까지 길을 다시 찾는다. 못 찾거나 너무 여러 번이면 멈춘다.</summary>
+    private void Replan()
+    {
+        if (_world == null || _terrain == null) return;
+        var route = ++_replans > MaxReplans
+            ? null
+            : Engine.Sea.SeaPathfinder.FindRoute(_world, _terrain, (_shipX, _shipY), _autoGoal, _autoLand);
+        // 다시 찾은 길이 한 마디뿐이면 이미 끝자리 곁이다 — 막힌 것이 아니라 도착이다.
+        if (route is { Count: < 2 })
+        {
+            CompleteAutoSail(_autoLand ? "도착했습니다" : "도착했습니다 — 닻을 내렸습니다");
             return;
         }
-        if (++_stuckTicks < StuckTickLimit) return;
-
-        _autoRoute = null;
-        _autoIndex = 0;
-        _stuckTicks = 0;
-        _dirty = true;
-        AutoSailEnded?.Invoke("길이 막혀 자동항해를 멈췄습니다");
+        if (route is not { Count: >= 2 })
+        {
+            _autoRoute = null;
+            _autoIndex = 0;
+            _dirty = true;
+            AutoSailEnded?.Invoke(_autoLand ? "길이 막혀 자동이동을 멈췄습니다" : "길이 막혀 자동항해를 멈췄습니다");
+            return;
+        }
+        int replans = _replans;
+        BeginAuto(route, _autoGoal, _autoLand);
+        _replans = replans;
+        _stuckIndex = _autoIndex;
     }
 
     /// <summary>지난 프레임에 그린 항로 마디 수.</summary>
@@ -1840,7 +1949,7 @@ public sealed class ShipMapHost : HwndHost
             // 예전 줄은 그래도 "커서 쪽으로 항해 중" 이라 적어 서 있는 배와 구별이 안 됐다.
             Status = AutoSailing
                 ? $"{(_onLand ? "자동이동" : "자동항해")} 중 {_shipX:F1}, {_shipY:F1} 칸 · 방향 {HeadingName} · " +
-                  (Paused ? "멈춤(창이 떠 있다)" : $"마디 {_autoIndex + 1}/{AutoRouteCount} 쪽으로")
+                  (Paused ? "멈춤(창이 떠 있다)" : $"마디 {_autoIndex + 1}/{AutoRouteCount} 쪽으로 · Esc 로 멈춤")
                 : $"{(_onLand ? "말" : "배")} {_shipX:F1}, {_shipY:F1} 칸 · 방향 {HeadingName} · " +
                      (Paused ? "멈춤(창이 떠 있다)"
                              : _anchored ? (_onLand ? "멈춰 서 있다" : "닻을 내리고 정박 중")

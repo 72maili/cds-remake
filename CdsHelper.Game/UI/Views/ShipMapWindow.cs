@@ -3470,9 +3470,13 @@ public sealed class ShipMapWindow : Window
             items.Add(($"[{_game.CityName(town)}]에 들어간다", () => { Close(); AskEnterCity(town); }));
         }
 
-        // 자동항해 중이면 끄는 줄을 둔다 — 원본에 없는 줄이다(자동항해가 원본에 없다).
+        // 자동항해 줄 — 원본에 없는 줄이다(자동항해가 원본에 없다). 원작은 원본 모양을 지키려 개발 창으로 옮겼는데(fb-ui-21),
+        // 이 포크는 바다에서 바로 쓰게 도로 둔다. 자동항해 중이면 끄는 줄이 그 자리에 선다.
+        // 도시를 고르는 동안은 게임을 세운다(Hold) — 창 뒤에서 배가 흘러가지 않게.
         if (_host.AutoSailing)
             items.Add((_host.IsOnLand ? "자동이동 중지" : "자동항해 중지", () => { Close(); CancelAutoSail(); }));
+        else if (!_host.IsOnLand)
+            items.Add(("자동항해", () => { Close(); Hold(ShowAutoSailDialog); }));
 
         if (_host.IsOnLand)
         {

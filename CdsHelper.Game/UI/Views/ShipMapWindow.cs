@@ -541,6 +541,8 @@ public sealed class ShipMapWindow : Window
             // 「도구 앱」은 개발 창으로 옮겼다 — 표를 손보는 길이라 개발 쪽이 맞다.
             // 원본에 없는 편의 기능(컨디션·미니맵·바람 화살표·기능·언어·출입 일수)은 모드 창에 모아 두었다.
             ("모드", ShowModDialog),
+            // 능력치 · 기능 · 언어 · 배 · 선원 · 항해사를 고치는 창(PlayerEditDialog) — 포크에서 더한 것이다.
+            ("에디터", () => PlayerEditDialog.Show(this, _game)),
             ("개발", ShowDevDialog));
         DockPanel.SetDock(titleBar, Dock.Top);
         shell.Children.Add(titleBar);

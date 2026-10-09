@@ -3472,11 +3472,20 @@ public sealed class ShipMapWindow : Window
 
         // 자동항해 줄 — 원본에 없는 줄이다(자동항해가 원본에 없다). 원작은 원본 모양을 지키려 개발 창으로 옮겼는데(fb-ui-21),
         // 이 포크는 바다에서 바로 쓰게 도로 둔다. 자동항해 중이면 끄는 줄이 그 자리에 선다.
-        // 도시를 고르는 동안은 게임을 세운다(Hold) — 창 뒤에서 배가 흘러가지 않게.
+        // 도시를 고르는 동안은 게임을 세운다 — 창 뒤에서 배가 흘러가지 않게. <b>Hold 를 쓰면 안 된다</b>: 커맨드 창은
+        // 오므라든 뒤에 닫혀 Closed 가 한 박자 늦게 오므로, Hold 가 「멈춤」을 기억했다가 되돌려 놓아 게임이 영영 섰다.
+        // 「…에 들어간다」처럼 _asking 을 세워 Closed 가 멈춤을 안 건드리게 하고, 창을 닫으면 푼다.
         if (_host.AutoSailing)
             items.Add((_host.IsOnLand ? "자동이동 중지" : "자동항해 중지", () => { Close(); CancelAutoSail(); }));
         else if (!_host.IsOnLand)
-            items.Add(("자동항해", () => { Close(); Hold(ShowAutoSailDialog); }));
+            items.Add(("자동항해", () =>
+            {
+                Close();
+                _asking = true;
+                _host.Paused = true;
+                try { ShowAutoSailDialog(); }
+                finally { _host.Paused = false; _asking = false; }
+            }));
 
         if (_host.IsOnLand)
         {

@@ -177,6 +177,8 @@ public sealed class PersonTable
     private PersonTable(List<Row> rows, int year = 0)
     {
         _rows = rows;
+        // 에디터에서 지금 판의 부하 기능 · 언어를 고쳐 둔 것이 있으면 얹는다(포크에서 더한 것 — MateEdits).
+        MateEdits.Apply(rows);
         Year = year;
     }
 

@@ -65,6 +65,20 @@ public sealed class PlayerEditDialog : GameWindow
     private readonly TextBox[][] _mateFields = new TextBox[Player.MaxMates][];
     private static readonly string[] MateSkillNames = ["검술", "사격술", "포술", "항해술", "운용술", "의학", "과학"];
 
+    /// <summary><see cref="MateSkillNames"/> 일곱이 기능 열셋(<see cref="Skill.Names"/>)의 몇째인지.</summary>
+    private static readonly int[] SharedSkill =
+        [Skill.Sword, Skill.Shooting, Skill.Gunnery, Skill.Sailing, Skill.Handling, Skill.Medicine, Skill.Science];
+
+    /// <summary>
+    /// 「기능·언어…」 창에서 고른 기능 열셋 · 언어 열넷 — 「적용」 전까지 들고 있는다. 사람을 바꾸면 버린다.
+    /// </summary>
+    /// <remarks>
+    /// 이 값은 세이브가 아니라 인물 표에 있어 <see cref="MateEdits"/> 에 판별로 적는다.
+    /// 일곱(<see cref="SharedSkill"/>)은 부하 자료(세이브)에도 있어 양쪽에 같이 적는다 — 쓰는 곳마다 보는 쪽이 갈린다.
+    /// </remarks>
+    private readonly (int[] Skills, int[] Langs)?[] _mateExtra = new (int[], int[])?[Player.MaxMates];
+    private readonly FrameworkElement[] _mateMore = new FrameworkElement[Player.MaxMates];
+
     private const string Empty = "(비움)";
 
     private PlayerEditDialog(Engine.Game game)
@@ -285,9 +299,10 @@ public sealed class PlayerEditDialog : GameWindow
     private FrameworkElement MatePage()
     {
         var page = Page();
-        page.Children.Add(Note("자리마다 사람을 고르고 능력을 고칩니다. 능력은 보이는 값 1~100, 기능은 0~3. 언어 조건은 보지 않습니다."));
+        page.Children.Add(Note("자리마다 사람을 고르고 능력을 고칩니다. 능력은 보이는 값 1~100, 기능은 0~3. 언어 조건은 보지 않습니다. " +
+                               "나머지 기능(웅변 · 측량 · 역사학 · 회계 · 조선기술 · 신학)과 언어는 「기능·언어…」에서 고칩니다 — 이 판에만 듭니다."));
         var grid = new Grid();
-        int columns = 2 + 5 + MateSkillNames.Length;
+        int columns = 2 + 5 + MateSkillNames.Length + 1;
         for (int c = 0; c < columns; c++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition());
         string[] heads = ["자리", "사람", "체력", "지력", "무력", "매력", "운", .. MateSkillNames];
@@ -322,9 +337,15 @@ public sealed class PlayerEditDialog : GameWindow
             _mateFields[slot] = fields;
 
             int at = slot;
+            var more = GameUi.PushButton("기능·언어…", () => EditMateSkills(at), 100);
+            more.Margin = new Thickness(4, 2, 0, 2);
+            _mateMore[slot] = more;
+            Place(grid, more, row, 2 + fields.Length);
+
             names.SelectionChanged += (_, _) =>
             {
                 if (_loading) return;
+                _mateExtra[at] = null;
                 FillMate(at, names.SelectedItem as string);
             };
         }
@@ -359,6 +380,7 @@ public sealed class PlayerEditDialog : GameWindow
         SyncCrewRange();
 
         _loading = true;
+        Array.Clear(_mateExtra);
         for (int slot = 0; slot < Player.MaxMates; slot++)
         {
             string name = _player.MateAt(slot);
@@ -467,6 +489,7 @@ public sealed class PlayerEditDialog : GameWindow
         var fields = _mateFields[slot];
         Player.MateInfo? who = string.IsNullOrEmpty(name) || name == Empty ? null : MateOf(name);
         foreach (var f in fields) f.IsEnabled = who != null;
+        _mateMore[slot].IsEnabled = who != null && MateRow(name!) != null;
         if (who is not { } w)
         {
             foreach (var f in fields) f.Text = "";
@@ -476,6 +499,40 @@ public sealed class PlayerEditDialog : GameWindow
                         Ability.Display(w.Charm), Ability.Display(w.Luck),
                         w.Sword, w.Shooting, w.Gunnery, w.Sailing, w.Handling, w.Medicine, w.Science];
         for (int i = 0; i < fields.Length; i++) fields[i].Text = values[i].ToString();
+    }
+
+    /// <summary>그 사람의 인물 표 줄 — 지금 판의 고친 기능 · 언어가 얹혀 있다(<see cref="MateEdits"/>). 없으면 null.</summary>
+    private PersonTable.Row? MateRow(string name) => _game.World?.People.FirstOrDefault(r => r.Name == name);
+
+    /// <summary>
+    /// 「기능·언어…」 — 그 자리 사람의 기능 열셋 · 언어 열넷을 고치는 창을 띄운다. 표의 일곱 칸과 값을 맞춰 둔다.
+    /// </summary>
+    private void EditMateSkills(int slot)
+    {
+        string name = (_mateNames[slot].SelectedItem as string ?? "").Trim();
+        if (name.Length == 0 || name == Empty || MateRow(name) is not { } row)
+        {
+            NoticeDialog.Show(this, "인물 표에서 그 사람을 찾지 못했습니다");
+            return;
+        }
+        var (skills, langs) = _mateExtra[slot] is { } kept
+            ? (kept.Skills.ToArray(), kept.Langs.ToArray())
+            : (Sized(row.Skills, Skill.Names.Length), Sized(row.Languages, Skill.Languages.Length));
+        var f = _mateFields[slot];
+        for (int k = 0; k < SharedSkill.Length; k++)
+            skills[SharedSkill[k]] = Read(f[5 + k], 0, Skill.MaxLevel, skills[SharedSkill[k]]);
+
+        if (MateSkillDialog.Ask(this, $"{Player.MateRoles[slot]} — {name}", skills, langs) is not { } picked) return;
+        _mateExtra[slot] = picked;
+        for (int k = 0; k < SharedSkill.Length; k++)
+            f[5 + k].Text = picked.Skills[SharedSkill[k]].ToString();
+    }
+
+    private static int[] Sized(int[] values, int length)
+    {
+        var sized = new int[length];
+        Array.Copy(values, sized, Math.Min(values.Length, length));
+        return sized;
     }
 
     /// <summary>그 사람의 신상 — 적어 둔 것을 먼저, 없으면 인물 표에서 베낀다.</summary>
@@ -616,6 +673,23 @@ public sealed class PlayerEditDialog : GameWindow
                 Medicine = Level(10, who.Medicine), Science = Level(11, who.Science),
             });
             _player.SetMate(slot, name);
+
+            // 기능 열셋 · 언어 열넷 — 인물 표 쪽. 일곱은 위 칸 값으로 맞추고, 달라졌으면 이 판의 것으로 적는다.
+            if (MateRow(name) is { } row)
+            {
+                var skills = _mateExtra[slot]?.Skills.ToArray() ?? Sized(row.Skills, Skill.Names.Length);
+                var langs = _mateExtra[slot]?.Langs.ToArray() ?? Sized(row.Languages, Skill.Languages.Length);
+                for (int k = 0; k < SharedSkill.Length; k++)
+                    skills[SharedSkill[k]] = Level(5 + k, skills[SharedSkill[k]]);
+                if (!skills.SequenceEqual(Sized(row.Skills, skills.Length))
+                    || !langs.SequenceEqual(Sized(row.Languages, langs.Length)))
+                {
+                    MateEdits.GameId = _player.GameId;
+                    MateEdits.Set(_player.GameId, row.Id, skills, langs);
+                    // 지금 떠 있는 세상 줄에도 곧바로 얹는다 — 표를 다시 열 때까지 기다리지 않게.
+                    MateEdits.Apply([row]);
+                }
+            }
         }
 
         LoadAll();
@@ -623,6 +697,67 @@ public sealed class PlayerEditDialog : GameWindow
     }
 
     // ── 조각 ────────────────────────────────────────────────────────────────
+
+    /// <summary>부하 한 사람의 기능 열셋 · 언어 열넷을 고치는 창. 「확인」이면 고친 값, 아니면 null.</summary>
+    private sealed class MateSkillDialog : GameWindow
+    {
+        private readonly TextBox[] _skillBoxes = new TextBox[Skill.Names.Length];
+        private readonly TextBox[] _langBoxes = new TextBox[Skill.Languages.Length];
+        private (int[] Skills, int[] Langs)? _result;
+
+        private MateSkillDialog(string title, int[] skills, int[] langs)
+        {
+            Title = title;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            SizeToContent = SizeToContent.WidthAndHeight;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ShowInTaskbar = false;
+            Background = GameUi.Back;
+
+            var bar = GameUi.TitleBar(title, Close);
+            GameUi.EnableDrag(this, bar);
+            var stack = new StackPanel();
+            stack.Children.Add(bar);
+            stack.Children.Add(LevelPage(Skill.Names, _skillBoxes, 4, "기능 열셋 — 0~3"));
+            stack.Children.Add(LevelPage(Skill.Languages, _langBoxes, 3, "언어 열넷 — 0~3. 이 판에서만 이 사람에게 듭니다."));
+            for (int i = 0; i < _skillBoxes.Length; i++) _skillBoxes[i].Text = skills[i].ToString();
+            for (int i = 0; i < _langBoxes.Length; i++) _langBoxes[i].Text = langs[i].ToString();
+
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 8, 0, 12),
+            };
+            buttons.Children.Add(GameUi.PushButton("확인", () =>
+            {
+                _result = ([.. _skillBoxes.Select((b, i) => Read(b, 0, Skill.MaxLevel, skills[i]))],
+                           [.. _langBoxes.Select((b, i) => Read(b, 0, Skill.MaxLevel, langs[i]))]);
+                Close();
+            }, 96));
+            buttons.Children.Add(new Border { Width = 12 });
+            buttons.Children.Add(GameUi.PushButton("취소", Close, 96));
+            stack.Children.Add(buttons);
+
+            Content = new Border
+            {
+                Background = GameUi.Back,
+                BorderBrush = GameUi.Edge,
+                BorderThickness = new Thickness(2),
+                Margin = new Thickness(4),
+                Child = stack,
+            };
+            KeyDown += (_, e) => { if (e.Key is Key.Escape) Close(); };
+        }
+
+        public static (int[] Skills, int[] Langs)? Ask(Window owner, string title, int[] skills, int[] langs)
+        {
+            var dialog = new MateSkillDialog(title, skills, langs) { Owner = owner };
+            dialog.ShowDialog();
+            return dialog._result;
+        }
+    }
 
     /// <summary>폼이 고치는 배 한 척 — 「적용」 전까지는 판에 안 들어간다.</summary>
     private sealed class ShipDraft

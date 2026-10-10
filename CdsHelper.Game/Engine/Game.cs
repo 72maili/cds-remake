@@ -514,6 +514,8 @@ public sealed class Game
     {
         get
         {
+            // 인물 표가 지금 판의 고친 부하 기능 · 언어를 얹도록 판 표지를 알린다(포크에서 더한 것 — MateEdits).
+            MateEdits.GameId = Player.GameId;
             // 표가 고쳐졌거나, 판이 갈렸거나(NEW GAME 은 주인공을 갈아 끼우고 불러오기는 Loads 를 올린다),
             // 날짜가 뒤로 갔으면 새로 짓는다 — 세상은 앞으로만 가므로(PersonWorld.Advance) 이른 세이브를
             // 불러오면 사람들이 늦은 판 자리에 얼어붙어 그 날짜를 지날 때까지 안 움직였다.
